@@ -1,8 +1,5 @@
 {
   "name": "swfa2026-proxy",
   "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "start": "vercel dev"
-  }
+  "private": true
 }

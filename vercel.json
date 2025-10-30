@@ -1,14 +1,5 @@
 {
   "version": 2,
-  "functions": {
-    "api/coingecko.js": {
-      "runtime": "nodejs18.x"
-    }
-  },
-  "routes": [
-    {
-      "src": "/api/coingecko",
-      "dest": "/api/coingecko.js"
-    }
-  ]
+  "builds": [{ "src": "api/coingecko.js", "use": "@vercel/node" }],
+  "routes": [{ "src": "/api/coingecko", "dest": "/api/coingecko.js" }]
 }

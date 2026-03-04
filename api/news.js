@@ -11,6 +11,19 @@
 // - Uses synonym-aware filtering (e.g., Binance/BNB/Binance Coin).
 // - If filtering yields zero, falls back to returning unfiltered top crypto headlines (never-empty UX).
 
+function parseCutoffISO(cutoffStr){
+  // cutoffStr expected "YYYY-MM-DD"
+  if(!cutoffStr) return null;
+  const d = new Date(cutoffStr + "T23:59:59Z"); // end-of-day UTC
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function publishedTime(it){
+  if(!it?.published) return 0;
+  const t = new Date(it.published).getTime();
+  return isNaN(t) ? 0 : t;
+}
+
 export default async function handler(req, res) {
   const cors = () => {
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -22,6 +35,9 @@ export default async function handler(req, res) {
     cors();
     return res.status(204).end();
   }
+
+  const cutoffStr = (req.query.cutoff || "").toString().trim();
+  const cutoffDate = parseCutoffISO(cutoffStr);
 
   cors();
 
@@ -216,6 +232,19 @@ export default async function handler(req, res) {
 
     filtered = sortNewest(filtered);
 
+    // Sort newest first
+    filtered = sortNewest(filtered);
+
+    // If cutoffDate provided, keep only items published <= cutoffDate
+    if (cutoffDate) {
+      const cutoffMs = cutoffDate.getTime();
+      filtered = filtered.filter(it => {
+        const t = publishedTime(it);
+        // If an item has no valid published date, drop it for cutoff mode
+        return t > 0 && t <= cutoffMs;
+      });
+    }
+    
     // Deduplicate by URL
     const seen = new Set();
     const out = [];
@@ -232,3 +261,4 @@ export default async function handler(req, res) {
     res.status(500).json({ error: e?.message || "Server error" });
   }
 }
+

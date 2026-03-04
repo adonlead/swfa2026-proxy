@@ -34,7 +34,7 @@ export default async function handler(req, res) {
     const feeds = [
       { name: "CryptoSlate", url: "https://cryptoslate.com/feed/" },
       { name: "Cointelegraph", url: "https://cointelegraph.com/rss" },
-      { name: "Yahoo Finance (Crypto)", url: "https://finance.yahoo.com/rss/crypto" }
+      { name: "CoinDesk", url: "https://www.coindesk.com/arc/outboundfeeds/rss/" }
     ];
 
     // Asset keyword synonyms (match your UI mapping)
@@ -232,3 +232,4 @@ export default async function handler(req, res) {
     res.status(500).json({ error: e?.message || "Server error" });
   }
 }
+

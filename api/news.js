@@ -1,6 +1,6 @@
 // /api/news.js
 // Vercel Serverless Function: fetch 3 RSS feeds, parse RSS/Atom, filter by selected asset keywords,
-// and (optionally) return an "as-of" snapshot using a cutoff date.
+// and optionally return an "as-of" snapshot using a cutoff date.
 //
 // Usage:
 //   https://swfa2026-proxy.vercel.app/api/news?q=bitcoin%20btc
@@ -10,18 +10,19 @@
 // - Regex-based RSS/Atom parsing (no deps).
 // - Debug payload included for diagnostics.
 // - Synonym-aware filtering.
-// - Cutoff mode: returns headlines published on or before the cutoff date.
-//   If date parsing fails for some items, it will fall back safely to avoid returning an empty list.
+// - STRICT cutoff mode: returns only headlines with parseable published dates <= cutoff.
+//   (No fallback to current headlines; avoids misleading results.)
+// - RSS feeds provide limited history; older cutoff dates may legitimately return zero items.
 
-function parseCutoffISO(cutoffStr){
-  if(!cutoffStr) return null;
-  // end-of-day UTC
+function parseCutoffISO(cutoffStr) {
+  if (!cutoffStr) return null;
+  // Interpret cutoff as end-of-day UTC so the whole selected day is included
   const d = new Date(cutoffStr + "T23:59:59Z");
   return isNaN(d.getTime()) ? null : d;
 }
 
-function publishedTime(it){
-  if(!it?.published) return 0;
+function publishedTime(it) {
+  if (!it?.published) return 0;
   const t = new Date(it.published).getTime();
   return isNaN(t) ? 0 : t;
 }
@@ -46,14 +47,12 @@ export default async function handler(req, res) {
     const cutoffStr = (req.query.cutoff || "").toString().trim();
     const cutoffDate = parseCutoffISO(cutoffStr);
 
-    // Feeds (serverless-friendly)
     const feeds = [
       { name: "CryptoSlate", url: "https://cryptoslate.com/feed/" },
       { name: "Cointelegraph", url: "https://cointelegraph.com/rss" },
       { name: "Yahoo Finance (Crypto)", url: "https://finance.yahoo.com/rss/crypto" }
     ];
 
-    // Asset keyword synonyms
     const synonyms = {
       "bitcoin btc": ["bitcoin", "btc"],
       "ethereum eth": ["ethereum", "eth"],
@@ -89,32 +88,29 @@ export default async function handler(req, res) {
       return m ? m[1].trim() : "";
     };
 
-    // Robust date normalization: returns ISO string or ""
-    function toISOorEmpty(d){
-      if(!d) return "";
+    function toISOorEmpty(d) {
+      if (!d) return "";
 
-      // Clean wrappers/spaces
       const s = String(d)
         .replace(/<!\[CDATA\[/g, "")
         .replace(/\]\]>/g, "")
         .replace(/\s+/g, " ")
         .trim();
 
-      // Try native parsing
+      // Native parse first
       let dt = new Date(s);
-      if(!isNaN(dt.getTime())) return dt.toISOString();
+      if (!isNaN(dt.getTime())) return dt.toISOString();
 
-      // Common ISO date without time
-      if(/^\d{4}-\d{2}-\d{2}$/.test(s)){
+      // ISO date without time
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
         dt = new Date(s + "T00:00:00Z");
-        if(!isNaN(dt.getTime())) return dt.toISOString();
+        if (!isNaN(dt.getTime())) return dt.toISOString();
       }
 
-      // Some RSS dates include trailing timezone text oddities; last attempt
-      // Remove commas and retry (helps some pubDate variants)
+      // Try removing commas (helps some pubDate variants)
       const s2 = s.replace(/,/g, "");
       dt = new Date(s2);
-      if(!isNaN(dt.getTime())) return dt.toISOString();
+      if (!isNaN(dt.getTime())) return dt.toISOString();
 
       return "";
     }
@@ -169,7 +165,6 @@ export default async function handler(req, res) {
             stripTags(pick(b, /<link[^>]*>([\s\S]*?)<\/link>/i)) ||
             stripTags(pick(b, /<guid[^>]*>([\s\S]*?)<\/guid>/i));
 
-          // Capture more date tags (some feeds use updated/published)
           const date =
             pick(b, /<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i) ||
             pick(b, /<dc:date[^>]*>([\s\S]*?)<\/dc:date>/i) ||
@@ -204,11 +199,7 @@ export default async function handler(req, res) {
     }
 
     function sortNewest(itemsArr) {
-      return itemsArr.sort((a, b) => {
-        const ta = publishedTime(a);
-        const tb = publishedTime(b);
-        return tb - ta;
-      });
+      return itemsArr.sort((a, b) => publishedTime(b) - publishedTime(a));
     }
 
     // ---------- fetch feeds ----------
@@ -223,8 +214,9 @@ export default async function handler(req, res) {
       totalAfterFilter: 0,
       totalAfterCutoff: 0,
       usedFallback: false,
-      cutoffFallbackUsed: false,
-      undatedCountParsed: 0
+      strictCutoff: !!cutoffDate,
+      undatedCountParsed: 0,
+      note: ""
     };
 
     let all = [];
@@ -236,10 +228,8 @@ export default async function handler(req, res) {
       if (s.status === "fulfilled") {
         const { ok, status, statusText, text } = s.value;
         debug.feeds.push({ name: f.name, url: f.url, ok, status, statusText });
-
         if (ok && text) {
-          const parsed = parseRSSorAtom(text, f.name);
-          all = all.concat(parsed);
+          all = all.concat(parseRSSorAtom(text, f.name));
         }
       } else {
         debug.feeds.push({
@@ -259,8 +249,9 @@ export default async function handler(req, res) {
     let filtered = filterItems(all, terms2);
     debug.totalAfterFilter = filtered.length;
 
-    // Never-empty UX: if no results after relevance filter, show top crypto headlines (unfiltered)
-    if (filtered.length === 0) {
+    // Only use fallback (unfiltered) when NO cutoff is requested.
+    // If cutoff is requested, we must not show unrelated "current" items.
+    if (!cutoffDate && filtered.length === 0) {
       debug.usedFallback = true;
       filtered = all.slice();
     }
@@ -268,21 +259,19 @@ export default async function handler(req, res) {
     // Sort newest first
     filtered = sortNewest(filtered);
 
-    // ---------- cutoff filter (as-of snapshot) ----------
+    // ---------- STRICT cutoff filter ----------
     if (cutoffDate) {
       const cutoffMs = cutoffDate.getTime();
 
-      // Prefer "dated" items for true as-of
-      const dated = filtered.filter(it => publishedTime(it) > 0);
-      const byCutoff = dated.filter(it => publishedTime(it) <= cutoffMs);
+      // Keep only dated items <= cutoff
+      filtered = filtered.filter(it => {
+        const t = publishedTime(it);
+        return t > 0 && t <= cutoffMs;
+      });
 
-      if (byCutoff.length > 0) {
-        filtered = byCutoff;
-      } else {
-        // If nothing matches cutoff (often due to feeds not providing parseable dates),
-        // fall back to showing the best available items (never blank).
-        debug.cutoffFallbackUsed = true;
-        filtered = filtered; // keep as-is
+      if (filtered.length === 0) {
+        debug.note =
+          "No RSS headlines available as-of the cutoff date. RSS feeds provide limited history windows; consider a news archive API for deeper historical coverage.";
       }
     }
 

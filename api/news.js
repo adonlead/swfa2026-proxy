@@ -12,12 +12,11 @@
 // - If filtering yields zero, falls back to returning unfiltered top crypto headlines (never-empty UX).
 
 function parseCutoffISO(cutoffStr){
-  // cutoffStr expected "YYYY-MM-DD"
   if(!cutoffStr) return null;
-  const d = new Date(cutoffStr + "T23:59:59Z"); // end-of-day UTC
+  // interpret cutoff as end-of-day UTC so the whole selected day is included
+  const d = new Date(cutoffStr + "T23:59:59Z");
   return isNaN(d.getTime()) ? null : d;
 }
-
 function publishedTime(it){
   if(!it?.published) return 0;
   const t = new Date(it.published).getTime();
@@ -231,8 +230,6 @@ export default async function handler(req, res) {
       filtered = all.slice(); // unfiltered
     }
 
-    filtered = sortNewest(filtered);
-
     // Sort newest first
     filtered = sortNewest(filtered);
 
@@ -241,7 +238,7 @@ export default async function handler(req, res) {
       const cutoffMs = cutoffDate.getTime();
       filtered = filtered.filter(it => {
         const t = publishedTime(it);
-        // If an item has no valid published date, drop it for cutoff mode
+        // If no valid date, drop in cutoff mode (keeps “as-of” accurate)
         return t > 0 && t <= cutoffMs;
       });
     }
@@ -262,5 +259,6 @@ export default async function handler(req, res) {
     res.status(500).json({ error: e?.message || "Server error" });
   }
 }
+
 
 

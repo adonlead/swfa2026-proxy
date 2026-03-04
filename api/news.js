@@ -1,34 +1,15 @@
 // /api/news.js
 // Vercel Serverless Function: fetch 3 RSS feeds, parse RSS/Atom, filter by selected asset keywords,
-// and optionally return an "as-of window" snapshot using a cutoff date.
+// return JSON for your SWFA 2026 news panel.
 //
-// Window behavior:
-// - If cutoff=YYYY-MM-DD is provided, return items published from
-//   cutoff 00:00:00Z through (cutoff + 1 day) 23:59:59Z (inclusive).
-// - This is intentionally strict (no fallback to "current" headlines),
-//   because RSS feeds do not provide reliable deep archives.
+// Usage (client):
+//   https://swfa2026-proxy.vercel.app/api/news?q=bitcoin%20btc
 //
-// Usage:
-//   /api/news?q=bitcoin%20btc
-//   /api/news?q=bitcoin%20btc&cutoff=2026-02-15
-
-function parseCutoffWindowUTC(cutoffStr) {
-  if (!cutoffStr) return null;
-
-  // Start of cutoff day UTC
-  const start = new Date(cutoffStr + "T00:00:00Z");
-  if (isNaN(start.getTime())) return null;
-
-  // End of (cutoff + 1 day) UTC
-  const end = new Date(start.getTime() + 2 * 24 * 3600 * 1000 - 1000); // +2 days -1s
-  return { start, end };
-}
-
-function publishedTime(it) {
-  if (!it?.published) return 0;
-  const t = new Date(it.published).getTime();
-  return isNaN(t) ? 0 : t;
-}
+// Notes:
+// - Uses a tolerant RSS/Atom parser (regex-based) to avoid dependencies.
+// - Includes DEBUG payload so you can diagnose blocked feeds / parse issues.
+// - Uses synonym-aware filtering (e.g., Binance/BNB/Binance Coin).
+// - If filtering yields zero, falls back to returning unfiltered top crypto headlines (never-empty UX).
 
 export default async function handler(req, res) {
   const cors = () => {
@@ -41,21 +22,22 @@ export default async function handler(req, res) {
     cors();
     return res.status(204).end();
   }
+
   cors();
 
   try {
     const qRaw = (req.query.q || "bitcoin btc").toString().trim();
     const q = qRaw.slice(0, 120);
 
-    const cutoffStr = (req.query.cutoff || "").toString().trim();
-    const cutoffWin = parseCutoffWindowUTC(cutoffStr);
-
+    // 3 feeds: choose sources that typically work well from serverless.
+    // If any feed fails (403/429), debug will reveal it.
     const feeds = [
       { name: "CryptoSlate", url: "https://cryptoslate.com/feed/" },
       { name: "Cointelegraph", url: "https://cointelegraph.com/rss" },
       { name: "Yahoo Finance (Crypto)", url: "https://finance.yahoo.com/rss/crypto" }
     ];
 
+    // Asset keyword synonyms (match your UI mapping)
     const synonyms = {
       "bitcoin btc": ["bitcoin", "btc"],
       "ethereum eth": ["ethereum", "eth"],
@@ -65,8 +47,7 @@ export default async function handler(req, res) {
       "binance bnb": ["binance", "bnb", "binance coin", "bnb chain"],
       "ripple xrp": ["ripple", "xrp"],
       "polkadot dot": ["polkadot", "dot"],
-      "litecoin ltc": ["litecoin", "ltc"],
-      "tron trx": ["tron", "trx"]
+      "litecoin ltc": ["litecoin", "ltc"]
     };
 
     const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
@@ -92,36 +73,16 @@ export default async function handler(req, res) {
       return m ? m[1].trim() : "";
     };
 
-    function toISOorEmpty(d) {
+    const toISOorEmpty = (d) => {
       if (!d) return "";
-
-      const s = String(d)
-        .replace(/<!\[CDATA\[/g, "")
-        .replace(/\]\]>/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
-
-      // Native parse first
-      let dt = new Date(s);
-      if (!isNaN(dt.getTime())) return dt.toISOString();
-
-      // ISO date without time
-      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-        dt = new Date(s + "T00:00:00Z");
-        if (!isNaN(dt.getTime())) return dt.toISOString();
-      }
-
-      // Try removing commas (helps some pubDate variants)
-      const s2 = s.replace(/,/g, "");
-      dt = new Date(s2);
-      if (!isNaN(dt.getTime())) return dt.toISOString();
-
-      return "";
-    }
+      const dt = new Date(d);
+      return isNaN(dt.getTime()) ? "" : dt.toISOString();
+    };
 
     async function fetchText(url) {
       const r = await fetch(url, {
         headers: {
+          // some sites behave better with a UA string
           "user-agent": "swfa2026-proxy/1.0 (+https://swfa2026-proxy.vercel.app)"
         }
       });
@@ -141,12 +102,9 @@ export default async function handler(req, res) {
           const title = stripTags(pick(e, /<title[^>]*>([\s\S]*?)<\/title>/i));
           let link = pick(e, /<link[^>]*href="([^"]+)"/i);
           if (!link) link = stripTags(pick(e, /<link[^>]*>([\s\S]*?)<\/link>/i));
-
           const date =
             pick(e, /<updated[^>]*>([\s\S]*?)<\/updated>/i) ||
-            pick(e, /<published[^>]*>([\s\S]*?)<\/published>/i) ||
-            pick(e, /<dc:date[^>]*>([\s\S]*?)<\/dc:date>/i);
-
+            pick(e, /<published[^>]*>([\s\S]*?)<\/published>/i);
           const summary =
             stripTags(pick(e, /<summary[^>]*>([\s\S]*?)<\/summary>/i)) ||
             stripTags(pick(e, /<content[^>]*>([\s\S]*?)<\/content>/i));
@@ -168,13 +126,9 @@ export default async function handler(req, res) {
           const link =
             stripTags(pick(b, /<link[^>]*>([\s\S]*?)<\/link>/i)) ||
             stripTags(pick(b, /<guid[^>]*>([\s\S]*?)<\/guid>/i));
-
           const date =
             pick(b, /<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i) ||
-            pick(b, /<dc:date[^>]*>([\s\S]*?)<\/dc:date>/i) ||
-            pick(b, /<published[^>]*>([\s\S]*?)<\/published>/i) ||
-            pick(b, /<updated[^>]*>([\s\S]*?)<\/updated>/i);
-
+            pick(b, /<dc:date[^>]*>([\s\S]*?)<\/dc:date>/i);
           const desc =
             stripTags(pick(b, /<description[^>]*>([\s\S]*?)<\/description>/i)) ||
             stripTags(pick(b, /<content:encoded[^>]*>([\s\S]*?)<\/content:encoded>/i));
@@ -203,7 +157,11 @@ export default async function handler(req, res) {
     }
 
     function sortNewest(itemsArr) {
-      return itemsArr.sort((a, b) => publishedTime(b) - publishedTime(a));
+      return itemsArr.sort((a, b) => {
+        const ta = a.published ? new Date(a.published).getTime() : 0;
+        const tb = b.published ? new Date(b.published).getTime() : 0;
+        return tb - ta;
+      });
     }
 
     // ---------- fetch feeds ----------
@@ -212,18 +170,10 @@ export default async function handler(req, res) {
     const debug = {
       q,
       terms: terms2,
-      cutoff: cutoffStr || "",
-      windowUTC: cutoffWin
-        ? { start: cutoffWin.start.toISOString(), end: cutoffWin.end.toISOString() }
-        : null,
       feeds: [],
       totalParsed: 0,
       totalAfterFilter: 0,
-      totalAfterWindow: 0,
-      usedFallback: false,
-      strictWindow: !!cutoffWin,
-      undatedCountParsed: 0,
-      note: ""
+      usedFallback: false
     };
 
     let all = [];
@@ -235,8 +185,10 @@ export default async function handler(req, res) {
       if (s.status === "fulfilled") {
         const { ok, status, statusText, text } = s.value;
         debug.feeds.push({ name: f.name, url: f.url, ok, status, statusText });
+
         if (ok && text) {
-          all = all.concat(parseRSSorAtom(text, f.name));
+          const parsed = parseRSSorAtom(text, f.name);
+          all = all.concat(parsed);
         }
       } else {
         debug.feeds.push({
@@ -250,40 +202,21 @@ export default async function handler(req, res) {
     }
 
     debug.totalParsed = all.length;
-    debug.undatedCountParsed = all.filter((it) => publishedTime(it) === 0).length;
 
     // ---------- relevance filter ----------
     let filtered = filterItems(all, terms2);
     debug.totalAfterFilter = filtered.length;
 
-    // Only fallback when NO cutoff window is requested (to avoid misleading “as-of” results)
-    if (!cutoffWin && filtered.length === 0) {
+    // Never-empty UX: if no results after filter, show top crypto headlines (unfiltered)
+    // so the panel isn't blank.
+    if (filtered.length === 0) {
       debug.usedFallback = true;
-      filtered = all.slice();
+      filtered = all.slice(); // unfiltered
     }
 
-    // Sort newest first
     filtered = sortNewest(filtered);
 
-    // ---------- cutoff window filter (cutoff day to cutoff+1 day) ----------
-    if (cutoffWin) {
-      const startMs = cutoffWin.start.getTime();
-      const endMs = cutoffWin.end.getTime();
-
-      filtered = filtered.filter((it) => {
-        const t = publishedTime(it);
-        return t > 0 && t >= startMs && t <= endMs;
-      });
-
-      if (filtered.length === 0) {
-        debug.note =
-          "No RSS headlines available in the selected cutoff window (cutoff day through cutoff+1 day). RSS feeds typically expose only a limited recent history window; for historical snapshots, a dedicated news archive API is required.";
-      }
-    }
-
-    debug.totalAfterWindow = filtered.length;
-
-    // Deduplicate by URL + cap
+    // Deduplicate by URL
     const seen = new Set();
     const out = [];
     for (const it of filtered) {

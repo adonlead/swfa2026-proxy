@@ -25,6 +25,10 @@ function publishedTime(it){
 }
 
 export default async function handler(req, res) {
+
+  const cutoffStr = (req.query.cutoff || "").toString().trim();
+  const cutoffDate = parseCutoffISO(cutoffStr);
+  
   const cors = () => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -34,10 +38,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") {
     cors();
     return res.status(204).end();
-  }
-
-  const cutoffStr = (req.query.cutoff || "").toString().trim();
-  const cutoffDate = parseCutoffISO(cutoffStr);
+  }  
 
   cors();
 
@@ -261,4 +262,5 @@ export default async function handler(req, res) {
     res.status(500).json({ error: e?.message || "Server error" });
   }
 }
+
 
